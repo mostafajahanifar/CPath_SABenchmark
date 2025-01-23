@@ -1,8 +1,45 @@
 import os
 import pandas as pd
+import numpy as np
 import torch
 from pathlib import Path
+from tqdm import tqdm
+
+
+def get_msi_dataset(root_dir, case_list_path, label_dict=None, filter_small_bags=None):
+    # Load the case list
+    case_df = pd.read_csv(case_list_path)
+    if label_dict is not None:
+        case_to_label = {case: label_dict[label] for case, label in zip(case_df['slide'], case_df['msi_status'])}
+    else:
+        case_to_label = dict(zip(case_df['slide'], case_df['msi_status']))
+    bag_names = [d for d in case_to_label.keys()]
+    labels = [case_to_label[case] for case in bag_names]
+    bag_folders = [os.path.join(root_dir, f, d) for d, f in zip(case_df['slide'], case_df['cancer_type'])]
+
+    # Filtering bags with low number of instances
+    bags_to_neglect = []
+    for bi, bag_folder in tqdm(enumerate(bag_folders), total=len(bag_folders), leave=False):
+        all_instances = np.load(os.path.join(bag_folder,"paths.npy"))
+        all_instances = [Path(path).stem for path in all_instances]
+        if filter_small_bags and len(all_instances) < filter_small_bags:
+            # flag this bag to be removed
+            bags_to_neglect.append(bi)
+            continue
+    # delete the bags with not enough instances
+    if  len(bags_to_neglect)>0:
+        bags_to_neglect.sort(reverse=True)
+        for bi in bags_to_neglect:
+            del bag_names[bi]
+            del bag_folders[bi]
+            del labels[bi]
+
+    df = pd.DataFrame({'slide': bag_names,
+                       'target': labels,
+                       'tensor_path': bag_folders})
     
+    return slide_dataset_classification(df)
+
 def get_datasets(mccv=0, data='', encoder='', method=''):
     # Load slide data
     df = pd.read_csv(os.path.join('/sc/arion/projects/comppath_500k/SAbenchmarks/data', data, 'slide_data.csv'))
@@ -51,11 +88,12 @@ class slide_dataset_classification(torch.utils.data.Dataset):
     
     def __getitem__(self, index):
         row = self.df.iloc[index]
-        data = torch.load(row.tensor_path)  # feature matrix and possibly other data
+        data = np.load(row.tensor_path + "/embeddings.npy")
+        # data = torch.load(row.tensor_path)  # feature matrix and possibly other data
         try:
             feat = data['features']
         except:
-            feat = data
+            feat = torch.tensor(data, dtype=torch.float32)
         return {'features': feat, 'target': row.target}
 
 class slide_dataset_classification_graph(slide_dataset_classification):
