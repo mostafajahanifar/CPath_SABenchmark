@@ -118,7 +118,6 @@ def main(config=None):
         os.makedirs(args.output)
     
     # Set datasets
-    train_dset = datasets.get_msi_dataset(root_dir=args.root_dir, case_list_path=args.train_list_path, label_dict=args.label_dict)
     train_dset, val_dset = datasets.get_datasets(mccv=args.mccv, data=args.data, encoder=args.encoder, method=args.method)
     train_loader = torch.utils.data.DataLoader(train_dset, batch_size=1, shuffle=True, num_workers=args.workers)
     val_loader = torch.utils.data.DataLoader(val_dset, batch_size=1, shuffle=False, num_workers=args.workers)
