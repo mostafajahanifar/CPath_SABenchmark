@@ -1,6 +1,7 @@
 import datasets
 import modules
 import os
+from pathlib import Path
 import argparse
 import pandas as pd
 import torch.backends.cudnn as cudnn
@@ -25,6 +26,7 @@ parser.add_argument('--log', type=str, default='convergence.csv', help='name of 
 parser.add_argument('--data_root', type=str, required=True)
 parser.add_argument('--train_list_path', type=str, required=True)
 parser.add_argument('--val_list_path', type=str, required=True)
+parser.add_argument('--test_list_paths', type=list, default=[])
 parser.add_argument('--label_dict', type=dict, default=None)
 
 parser.add_argument('--method', type=str, default='', choices=[
@@ -102,7 +104,7 @@ def calculate_model_size(model):
 def main(config=None):
     # Initialize wandb
     wandb.init(project=args.wandb_project, notes=args.wandb_note)
-    
+
     # if args.sweep_config:
     # Now update args with wandb.config
     for key, value in wandb.config.items():
@@ -116,31 +118,31 @@ def main(config=None):
             wandb.config[key] = value
 
     wandb.config.update(args_dict, allow_val_change=True)
-    
+
     if args.random_seed:
         set_random_seed(args.random_seed)
-    
+
     if not os.path.exists(args.output):
         os.makedirs(args.output)
-    
+
     # Set datasets
     train_dset = datasets.get_msi_dataset(root_dir=args.data_root, case_list_path=args.train_list_path, label_dict=args.label_dict)
     val_dset = datasets.get_msi_dataset(root_dir=args.root_dir, case_list_path=args.train_list_path, label_dict=args.label_dict)
     train_loader = torch.utils.data.DataLoader(train_dset, batch_size=1, shuffle=True, num_workers=args.workers)
     val_loader = torch.utils.data.DataLoader(val_dset, batch_size=1, shuffle=False, num_workers=args.workers)
-    
+
     # Get model
     model = modules.get_aggregator(method=args.method, ndim=args.ndim) # model = modules.get_aggregator(method='AB-MIL', ndim=256)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    
+
     # Set loss
     criterion = nn.CrossEntropyLoss().to(device)
-    
+
     # Set optimizer
     params_groups = get_params_groups(model)
     optimizer = optim.AdamW(params_groups)
-    
+
     # Set schedulers
     lr_schedule = cosine_scheduler(
         args.lr,
@@ -156,7 +158,7 @@ def main(config=None):
         len(train_loader),
     )
     cudnn.benchmark = True
-    
+
     best_auc = 0.0
     # Main training loop
     for epoch in range(args.nepochs+1):
@@ -192,14 +194,14 @@ def main(config=None):
                 wandb.run.summary["best_epoch"] = epoch
 
                 # save the best model
-                model_filename = os.path.join(args.output,'best_auc_model.pth')
+                best_model_filename = os.path.join(args.output,'best_auc_model.pth')
                 obj = {
                     'epoch': epoch,
                     'state_dict': model.state_dict(),
                     'auc': auc,
                     'optimizer': optimizer.state_dict()
                 }
-                torch.save(obj, model_filename)
+                torch.save(obj, best_model_filename)
                 print(f"Saved best AUC model at epoch {epoch}, AUC={auc}")
 
     model_filename = os.path.join(args.output,'final_model.pth')
@@ -218,7 +220,7 @@ def main(config=None):
     trainable_params = model_summary.trainable_params
     wandb.run.summary["model_size (MB)"] = calculate_model_size(model) / (8 * 1024 * 1024)
     wandb.run.summary["trainable_params"] = trainable_params
-    
+
     # only save the last model to artifact
     ### Model saving logic
     obj = {
@@ -228,13 +230,32 @@ def main(config=None):
         'optimizer': optimizer.state_dict()
     }
     torch.save(obj, model_filename)
-    
+
     # Create a wandb Artifact and add the file to it
     model_artifact = wandb.Artifact('final_model_checkpoint', type='model')
     model_artifact.add_file(model_filename)
     wandb.log_artifact(model_artifact)
 
     print(f"Saved final model at epoch {epoch}")
+
+
+    # save the prediction and attention scores for patches
+    model.load_state_dict(torch.load(best_model_filename)['state_dict'])
+    for test_list_path in args.test_list_paths:
+        # loading the best model weights from validation
+
+        # creating the test data loader
+        domain_name = test_list_path.stem.split('_')[-1]  # Extracting the domain name from the filename
+        test_dset = datasets.get_msi_dataset(root_dir=args.root_dir, case_list_path=test_list_path, label_dict=args.label_dict)
+        test_loader = torch.utils.data.DataLoader(test_dset, batch_size=1, shuffle=True, num_workers=args.workers)
+
+        # Running the model on the test set
+        inference_start_time = time.time()
+        probs = test(epoch, test_loader, model, device)
+        inference_end_time = time.time()
+        inference_runtime = inference_end_time - inference_start_time
+        auc = roc_auc_score(test_loader.dataset.df.target, probs)
+        wandb.log({"test_domain": domain_name, "test_auc": auc, "inference_runtime": inference_runtime})
 
     wandb.finish()
 
@@ -299,7 +320,7 @@ def test(run, loader, model, device):
 
 def train(run, loader, model, criterion, optimizer, lr_schedule, wd_schedule, device):
     # Set model in training mode
-    
+    model.train()
     # Initialize loss
     running_loss = 0.
     # Loop through batches
