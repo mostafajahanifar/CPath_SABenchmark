@@ -22,6 +22,11 @@ parser = argparse.ArgumentParser()
 #I/O PARAMS
 parser.add_argument('--output', type=str, default='.', help='output directory')
 parser.add_argument('--log', type=str, default='convergence.csv', help='name of log file')
+parser.add_argument('--data_root', type=str, required=True)
+parser.add_argument('--train_list_path', type=str, required=True)
+parser.add_argument('--val_list_path', type=str, required=True)
+parser.add_argument('--label_dict', type=dict, default=None)
+
 parser.add_argument('--method', type=str, default='', choices=[
     'AB-MIL',
     'CLAM_SB',
@@ -38,24 +43,25 @@ parser.add_argument('--method', type=str, default='', choices=[
     'ViT_MIL',
     'DTMIL'
 ], help='which aggregation method to use')
-parser.add_argument('--data', type=str, default='', choices=[
-    'msk_lung_egfr',
-    'msk_lung_io',
-    'sinai_breast_cancer',
-    'sinai_breast_er',
-    'sinai_lung_egfr',
-    'sinai_ibd_detection',
-    'biome_breast_hrd',
-    'llovet_hcc_io',
-], help='which data to use')
+# parser.add_argument('--data', type=str, default='', choices=[
+#     'msk_lung_egfr',
+#     'msk_lung_io',
+#     'sinai_breast_cancer',
+#     'sinai_breast_er',
+#     'sinai_lung_egfr',
+#     'sinai_ibd_detection',
+#     'biome_breast_hrd',
+#     'llovet_hcc_io',
+# ], help='which data to use')
 parser.add_argument('--encoder', type=str, default='', choices=[
     'tres50_imagenet',
     'dinosmall',
-    'dinobase'
+    'dinobase',
+    'uni'
 ], help='which encoder to use')
 
 parser.add_argument('--mccv', default=1, type=int, choices=list(range(1,22)), help='which seed (default: 1/20)')
-parser.add_argument('--ndim', default=512, type=int, help='output dimension of feature extractor')
+parser.add_argument('--ndim', default=1024, type=int, help='output dimension of feature extractor')
 
 #OPTIMIZATION PARAMS
 parser.add_argument('--momentum', default=0.9, type=float, help='momentum (default: 0.9)')
@@ -118,8 +124,8 @@ def main(config=None):
         os.makedirs(args.output)
     
     # Set datasets
-    train_dset = datasets.get_msi_dataset(root_dir=args.root_dir, case_list_path=args.train_list_path, label_dict=args.label_dict)
-    train_dset, val_dset = datasets.get_datasets(mccv=args.mccv, data=args.data, encoder=args.encoder, method=args.method)
+    train_dset = datasets.get_msi_dataset(root_dir=args.data_root, case_list_path=args.train_list_path, label_dict=args.label_dict)
+    val_dset = datasets.get_msi_dataset(root_dir=args.root_dir, case_list_path=args.train_list_path, label_dict=args.label_dict)
     train_loader = torch.utils.data.DataLoader(train_dset, batch_size=1, shuffle=True, num_workers=args.workers)
     val_loader = torch.utils.data.DataLoader(val_dset, batch_size=1, shuffle=False, num_workers=args.workers)
     
@@ -154,34 +160,29 @@ def main(config=None):
     best_auc = 0.0
     # Main training loop
     for epoch in range(args.nepochs+1):
-        if epoch in [0,5,10, 20, 30, 39]:  # Special case for testing feature extractor
+        # Regular training and validation logic
+        train_start_time = time.time()
+        loss = train(epoch, train_loader, model, criterion, optimizer, lr_schedule, wd_schedule, device)
+        train_end_time = time.time()
+        train_runtime =  train_end_time - train_start_time
+        memory_gpu = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
+
+        # Get the current learning rate from the first parameter group
+        current_lr = optimizer.param_groups[0]['lr']
+        current_wd = optimizer.param_groups[0]['weight_decay']
+
+        # Regular AUC logging
+        wandb.log({"epoch": epoch, "train_loss": loss ,"val_auc": auc, 'lr_step': current_lr, 'wd_step': current_wd,
+                    "train_runtime": train_runtime, "inference_runtime": inference_runtime, "memory_gpu": memory_gpu})
+
+        if (epoch+1)%2 == 0:  # Special case for testing feature extractor
             # Validation logic for feature extractor testing
             inference_start_time = time.time()
             probs = test(epoch, val_loader, model, device)
             inference_end_time = time.time()
             inference_runtime = inference_end_time - inference_start_time
             auc = roc_auc_score(val_loader.dataset.df.target, probs)
-            # wandb.log({"epoch": epoch, "val_auc": auc})
-        else:
-            # Regular training and validation logic
-            train_start_time = time.time()
-            loss = train(epoch, train_loader, model, criterion, optimizer, lr_schedule, wd_schedule, device)
-            train_end_time = time.time()
-            train_runtime =  train_end_time - train_start_time
-            memory_gpu = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
 
-            # Get the current learning rate from the first parameter group
-            current_lr = optimizer.param_groups[0]['lr']
-            current_wd = optimizer.param_groups[0]['weight_decay']
-            # inference_start_time = time.time()
-            # probs = test(epoch, val_loader, model, device)
-            # inference_end_time = time.time()
-            # inference_runtime = inference_end_time - inference_start_time
-
-            # Regular AUC logging
-            wandb.log({"epoch": epoch, "train_loss": loss ,"val_auc": auc, 'lr_step': current_lr, 'wd_step': current_wd,
-                        "train_runtime": train_runtime, "inference_runtime": inference_runtime, "memory_gpu": memory_gpu})
-            
             # Check if the current model is the best one
             if auc > best_auc:
                 print(f"New best model found at epoch {epoch} with AUC: {auc}")
@@ -189,6 +190,17 @@ def main(config=None):
                 # Log this event to wandb
                 wandb.run.summary["best_auc"] = auc
                 wandb.run.summary["best_epoch"] = epoch
+
+                # save the best model
+                model_filename = os.path.join(args.output,'best_auc_model.pth')
+                obj = {
+                    'epoch': epoch,
+                    'state_dict': model.state_dict(),
+                    'auc': auc,
+                    'optimizer': optimizer.state_dict()
+                }
+                torch.save(obj, model_filename)
+                print(f"Saved best AUC model at epoch {epoch}, AUC={auc}")
 
     model_filename = os.path.join(args.output,'final_model.pth')
 
@@ -489,6 +501,8 @@ if __name__ == '__main__':
         args.ndim = 384
     elif args.encoder.startswith('dinobase'):
         args.ndim = 768
+    elif args.encoder.startswith('uni'):
+        args.ndim = 1024
         
     # Update args with hyperparameters based on the file extension of parameter_path
     if args.parameter_path:
