@@ -242,8 +242,6 @@ def main(config=None):
     # save the prediction and attention scores for patches
     model.load_state_dict(torch.load(best_model_filename)['state_dict'])
     for test_list_path in args.test_list_paths:
-        # loading the best model weights from validation
-
         # creating the test data loader
         domain_name = test_list_path.stem.split('_')[-1]  # Extracting the domain name from the filename
         test_dset = datasets.get_msi_dataset(root_dir=args.root_dir, case_list_path=test_list_path, label_dict=args.label_dict)
