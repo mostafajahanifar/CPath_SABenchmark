@@ -8,19 +8,19 @@ def get_config():
     parser.add_argument('--output_root', type=str, default='.', help='output directory')
     parser.add_argument('--data_root', type=str, required=True)
     parser.add_argument('--experiment_list_root', type=str, default="where_experiment_lists_are")
-    parser.add_argument('--additional_desc', type=str, default="3cancers-newTrans-idars-s25x0.1-e50x0.3-valAUROC")
+    parser.add_argument('--additional_desc', type=str, default=None)
     parser.add_argument('-f','--folds', nargs='+', type=int, help='Experiment folds to be processed', default=[1, 2, 3])
     parser.add_argument('-d','--design', type=str, help='Experiment design to be processed', default="keep-1-domains-in" )
-    parser.add_argument('--label_dict', type=dict, default=None)
+    parser.add_argument('--label_dict', type=dict, default={"MSS": 0, "MSI-L": 0, "MSI-H": 1})
 
     parser.add_argument('--train_list_path', type=str)
     parser.add_argument('--val_list_path', type=str)
     parser.add_argument('--test_list_paths', type=list, default=[])
-    parser.add_argument('--log', type=str, required=True)
-    parser.add_argument('--output', type=str, required=True)
+    parser.add_argument('--log', type=str)
+    parser.add_argument('--output', type=str)
 
     # Method PARAMS
-    parser.add_argument('--method', type=str, default='', choices=[
+    parser.add_argument('--method', type=str, required=True, choices=[
         'AB-MIL',
         'CLAM_SB',
         'CLAM_MB',
@@ -36,7 +36,7 @@ def get_config():
         'ViT_MIL',
         'DTMIL'
     ], help='which aggregation method to use')
-    parser.add_argument('--encoder', type=str, default='', choices=[
+    parser.add_argument('--encoder', type=str, default='uni', choices=[
         'tres50_imagenet',
         'dinosmall',
         'dinobase',
@@ -54,7 +54,7 @@ def get_config():
     parser.add_argument('--weight_decay', type=float, default=0.04, help="""Initial value of the weight decay. With ViT, a smaller value at the beginning of training works well.""")
     parser.add_argument('--weight_decay_end', type=float, default=0.4, help="""Final value of the weight decay. We use a cosine schedule for WD and using a larger decay by the end of training improves performance for ViTs.""")
     parser.add_argument('--nepochs', type=int, default=40, help='number of epochs (default: 40)')
-    parser.add_argument('--workers', default=10, type=int, help='number of data loading workers (default: 10)')
+    parser.add_argument('--workers', default=4, type=int, help='number of data loading workers (default: 10)')
     parser.add_argument('--random_seed', default=0, type=int, help='random seed')
 
     # Weight and Bias Config

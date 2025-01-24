@@ -1,19 +1,15 @@
 import datasets
 import modules
 import os
-from pathlib import Path
 import argparse
 import pandas as pd
 import torch.backends.cudnn as cudnn
 import torch
 import torch.optim as optim
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 import random
 import time
-import pdb
-import yaml
 import wandb
 from sklearn.metrics import roc_auc_score
 from torchinfo import summary
@@ -38,9 +34,10 @@ def calculate_model_size(model):
             size_model += param.numel() * torch.iinfo(param.data.dtype).bits
     return size_model
 
-def main(config=None):
+def main(args):
     # Initialize wandb
-    wandb.init(project=args.wandb_project, notes=args.wandb_note)
+    wandb.login()
+    wandb.init(project=args.wandb_project, group=args.wandb_group, name=args.wandb_note)
 
     # if args.sweep_config:
     # Now update args with wandb.config
@@ -64,7 +61,7 @@ def main(config=None):
 
     # Set datasets
     train_dset = datasets.get_msi_dataset(root_dir=args.data_root, case_list_path=args.train_list_path, label_dict=args.label_dict)
-    val_dset = datasets.get_msi_dataset(root_dir=args.root_dir, case_list_path=args.train_list_path, label_dict=args.label_dict)
+    val_dset = datasets.get_msi_dataset(root_dir=args.data_root, case_list_path=args.val_list_path, label_dict=args.label_dict)
     train_loader = torch.utils.data.DataLoader(train_dset, batch_size=1, shuffle=True, num_workers=args.workers)
     val_loader = torch.utils.data.DataLoader(val_dset, batch_size=1, shuffle=False, num_workers=args.workers)
 
@@ -98,10 +95,11 @@ def main(config=None):
 
     best_auc = 0.0
     # Main training loop
-    for epoch in range(args.nepochs+1):
+    for epoch in range(1, args.nepochs+1):
+        print(f"********************** Epoch {epoch} / {args.nepochs} **********************")
         # Regular training and validation logic
         train_start_time = time.time()
-        loss = train(epoch, train_loader, model, criterion, optimizer, lr_schedule, wd_schedule, device)
+        loss = train(epoch, train_loader, model, criterion, optimizer, lr_schedule, wd_schedule, device, args)
         train_end_time = time.time()
         train_runtime =  train_end_time - train_start_time
         memory_gpu = torch.cuda.max_memory_allocated(device) / (1024 * 1024)
@@ -110,21 +108,22 @@ def main(config=None):
         current_lr = optimizer.param_groups[0]['lr']
         current_wd = optimizer.param_groups[0]['weight_decay']
 
-        # Regular AUC logging
-        wandb.log({"epoch": epoch, "train_loss": loss ,"val_auc": auc, 'lr_step': current_lr, 'wd_step': current_wd,
-                    "train_runtime": train_runtime, "inference_runtime": inference_runtime, "memory_gpu": memory_gpu})
-
         if (epoch+1)%2 == 0:  # Special case for testing feature extractor
             # Validation logic for feature extractor testing
             inference_start_time = time.time()
-            probs = test(epoch, val_loader, model, device)
+            probs = test(epoch, val_loader, model, device, args)
             inference_end_time = time.time()
             inference_runtime = inference_end_time - inference_start_time
             auc = roc_auc_score(val_loader.dataset.df.target, probs)
 
+            # Regular AUC logging
+            print(f"Eepoch {epoch} -- Train Loss={loss} ; AUC={auc}")
+            wandb.log({"epoch": epoch, "train_loss": loss ,"val_auc": auc, 'lr_step': current_lr, 'wd_step': current_wd,
+                        "train_runtime": train_runtime, "inference_runtime": inference_runtime, "memory_gpu": memory_gpu})
+
             # Check if the current model is the best one
             if auc > best_auc:
-                print(f"New best model found at epoch {epoch} with AUC: {auc}")
+                print(f"New best model found")
                 best_auc = auc
                 # Log this event to wandb
                 wandb.run.summary["best_auc"] = auc
@@ -139,7 +138,10 @@ def main(config=None):
                     'optimizer': optimizer.state_dict()
                 }
                 torch.save(obj, best_model_filename)
-                print(f"Saved best AUC model at epoch {epoch}, AUC={auc}")
+        else:
+            print(f"Eepoch {epoch} -- Train Loss={loss}")
+            wandb.log({"epoch": epoch, "train_loss": loss , 'lr_step': current_lr, 'wd_step': current_wd,
+                        "train_runtime": train_runtime, "memory_gpu": memory_gpu})
 
     model_filename = os.path.join(args.output,'final_model.pth')
 
@@ -153,7 +155,7 @@ def main(config=None):
         input_sizes = (256, args.ndim)
         model_summary = summary(model, input_size=input_sizes, verbose=0)
 
-    print("model_summary:",model_summary)
+    # print("model_summary:",model_summary)
     trainable_params = model_summary.trainable_params
     wandb.run.summary["model_size (MB)"] = calculate_model_size(model) / (8 * 1024 * 1024)
     wandb.run.summary["trainable_params"] = trainable_params
@@ -178,23 +180,31 @@ def main(config=None):
 
     # save the prediction and attention scores for patches
     model.load_state_dict(torch.load(best_model_filename)['state_dict'])
+    test_results = []  # Store AUCs for all domains
     for test_list_path in args.test_list_paths:
         # creating the test data loader
         domain_name = test_list_path.stem.split('_')[-1]  # Extracting the domain name from the filename
-        test_dset = datasets.get_msi_dataset(root_dir=args.root_dir, case_list_path=test_list_path, label_dict=args.label_dict)
+        test_dset = datasets.get_msi_dataset(root_dir=args.data_root, case_list_path=test_list_path, label_dict=args.label_dict)
         test_loader = torch.utils.data.DataLoader(test_dset, batch_size=1, shuffle=True, num_workers=args.workers)
 
         # Running the model on the test set
         inference_start_time = time.time()
-        probs = test(epoch, test_loader, model, device)
+        probs = test(epoch, test_loader, model, device, args)
         inference_end_time = time.time()
         inference_runtime = inference_end_time - inference_start_time
         auc = roc_auc_score(test_loader.dataset.df.target, probs)
-        wandb.log({"test_domain": domain_name, "test_auc": auc, "inference_runtime": inference_runtime})
+        # Log each domain's test result
+        wandb.log({
+            f"{domain_name}_test_auc": auc,
+        })
 
+    # Create a wandb Artifact for the best model and add the file to it
+    model_artifact = wandb.Artifact('best_model_checkpoint', type='model')
+    model_artifact.add_file(model_filename)
+    wandb.log_artifact(model_artifact)
     wandb.finish()
 
-def test(run, loader, model, device):
+def test(run, loader, model, device, args):
     # Set model in test mode
     model.eval()
     # Initialize probability vector
@@ -253,7 +263,7 @@ def test(run, loader, model, device):
 
     return probs.cpu().numpy()
 
-def train(run, loader, model, criterion, optimizer, lr_schedule, wd_schedule, device):
+def train(run, loader, model, criterion, optimizer, lr_schedule, wd_schedule, device, args):
     # Set model in training mode
     model.train()
     # Initialize loss
@@ -454,8 +464,8 @@ if __name__ == '__main__':
     parser.add_argument('--output', type=str, default='.', help='output directory')
     parser.add_argument('--log', type=str, default='convergence.csv', help='name of log file')
     parser.add_argument('--data_root', type=str, required=True)
-    parser.add_argument('--train_list_path', type=str, required=True)
-    parser.add_argument('--val_list_path', type=str, required=True)
+    parser.add_argument('--train_list_path', type=str)
+    parser.add_argument('--val_list_path', type=str)
     parser.add_argument('--test_list_paths', type=list, default=[])
     parser.add_argument('--label_dict', type=dict, default=None)
 
@@ -493,7 +503,7 @@ if __name__ == '__main__':
     parser.add_argument('--weight_decay', type=float, default=0.04, help="""Initial value of the weight decay. With ViT, a smaller value at the beginning of training works well.""")
     parser.add_argument('--weight_decay_end', type=float, default=0.4, help="""Final value of the weight decay. We use a cosine schedule for WD and using a larger decay by the end of training improves performance for ViTs.""")
     parser.add_argument('--nepochs', type=int, default=40, help='number of epochs (default: 40)')
-    parser.add_argument('--workers', default=10, type=int, help='number of data loading workers (default: 10)')
+    parser.add_argument('--workers', default=8, type=int, help='number of data loading workers (default: 10)')
     parser.add_argument('--random_seed', default=0, type=int, help='random seed')
 
     # Weight and Bias Config
