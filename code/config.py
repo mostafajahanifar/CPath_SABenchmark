@@ -54,7 +54,7 @@ def get_config():
     parser.add_argument('--weight_decay', type=float, default=0.04, help="""Initial value of the weight decay. With ViT, a smaller value at the beginning of training works well.""")
     parser.add_argument('--weight_decay_end', type=float, default=0.4, help="""Final value of the weight decay. We use a cosine schedule for WD and using a larger decay by the end of training improves performance for ViTs.""")
     parser.add_argument('--nepochs', type=int, default=40, help='number of epochs (default: 40)')
-    parser.add_argument('--workers', default=4, type=int, help='number of data loading workers (default: 10)')
+    parser.add_argument('--workers', default=8, type=int, help='number of data loading workers (default: 10)')
     parser.add_argument('--random_seed', default=0, type=int, help='random seed')
 
     # Weight and Bias Config

@@ -11,11 +11,11 @@ import numpy as np
 import random
 import time
 import wandb
-from sklearn.metrics import roc_auc_score
-from torchinfo import summary
+from evaluation import evaluate, log_results
 
 
 def set_random_seed(seed_value):
+    print(f"Set random seed to: {seed_value}")
     random.seed(seed_value)  # Python random module.
     np.random.seed(seed_value)  # Numpy module.
     torch.manual_seed(seed_value)  # Sets the seed for generating random numbers for CPU.
@@ -94,6 +94,7 @@ def main(args):
     cudnn.benchmark = True
 
     best_auc = 0.0
+    best_thresh = None
     # Main training loop
     for epoch in range(1, args.nepochs+1):
         print(f"********************** Epoch {epoch} / {args.nepochs} **********************")
@@ -114,19 +115,31 @@ def main(args):
             probs = test(epoch, val_loader, model, device, args)
             inference_end_time = time.time()
             inference_runtime = inference_end_time - inference_start_time
-            auc = roc_auc_score(val_loader.dataset.df.target, probs)
+
+            val_metrics = evaluate(val_loader.dataset.df.target, probs)
+            val_metrics_prefixed = {f"val_{key}": value for key, value in val_metrics.items()}
 
             # Regular AUC logging
-            print(f"Eepoch {epoch} -- Train Loss={loss} ; AUC={auc}")
-            wandb.log({"epoch": epoch, "train_loss": loss ,"val_auc": auc, 'lr_step': current_lr, 'wd_step': current_wd,
-                        "train_runtime": train_runtime, "inference_runtime": inference_runtime, "memory_gpu": memory_gpu})
+            print(f"Eepoch {epoch} -- Train Loss={loss}")
+            print(val_metrics_prefixed)
+            wandb.log({
+                    "epoch": epoch,
+                    "train_loss": loss,
+                    "lr_step": current_lr,
+                    "wd_step": current_wd,
+                    "train_runtime": train_runtime,
+                    "inference_runtime": inference_runtime,
+                    "memory_gpu": memory_gpu,
+                    **val_metrics_prefixed  # Log prefixed validation metrics
+                })
 
             # Check if the current model is the best one
-            if auc > best_auc:
+            if val_metrics["AUROC"] > best_auc:
                 print(f"New best model found")
-                best_auc = auc
+                best_auc = val_metrics["AUROC"]
+                best_thresh = val_metrics["Treshold"]
                 # Log this event to wandb
-                wandb.run.summary["best_auc"] = auc
+                wandb.run.summary["best_auc"] = val_metrics["AUROC"]
                 wandb.run.summary["best_epoch"] = epoch
 
                 # save the best model
@@ -134,38 +147,23 @@ def main(args):
                 obj = {
                     'epoch': epoch,
                     'state_dict': model.state_dict(),
-                    'auc': auc,
+                    'auc': val_metrics["AUROC"],
                     'optimizer': optimizer.state_dict()
                 }
                 torch.save(obj, best_model_filename)
+                best_val_metrics = val_metrics.copy()
         else:
             print(f"Eepoch {epoch} -- Train Loss={loss}")
             wandb.log({"epoch": epoch, "train_loss": loss , 'lr_step': current_lr, 'wd_step': current_wd,
                         "train_runtime": train_runtime, "memory_gpu": memory_gpu})
 
     model_filename = os.path.join(args.output,'final_model.pth')
-
-    if args.method in ['PatchGCN', 'DeepGraphConv']:
-        input_sizes = [(256, args.ndim), (2, 256), (2, 256)]
-        feat = torch.randn(input_sizes[0]).cuda()  # Random features
-        edge_index = torch.randint(0, 256, (2, 256), dtype=torch.int64).cuda()  # Random edge indices
-        edge_latent = torch.randint(0, 256, (2, 256), dtype=torch.int64).cuda()  # Random edge indices for latent graph
-        model_summary = summary(model, input_data=(feat, edge_index, edge_latent), verbose=0)
-    else:
-        input_sizes = (256, args.ndim)
-        model_summary = summary(model, input_size=input_sizes, verbose=0)
-
-    # print("model_summary:",model_summary)
-    trainable_params = model_summary.trainable_params
-    wandb.run.summary["model_size (MB)"] = calculate_model_size(model) / (8 * 1024 * 1024)
-    wandb.run.summary["trainable_params"] = trainable_params
-
+    run_num = args.wandb_note.split("_")[-1]
+    log_results(best_val_metrics,  f"{args.wandb_group}_validation", os.path.join(args.output_root, args.wandb_project, f"validation_results_run{run_num}.csv"))
     # only save the last model to artifact
     ### Model saving logic
     obj = {
-        'epoch': epoch,
         'state_dict': model.state_dict(),
-        'auc': auc,
         'optimizer': optimizer.state_dict()
     }
     torch.save(obj, model_filename)
@@ -177,10 +175,9 @@ def main(args):
 
     print(f"Saved final model at epoch {epoch}")
 
-
+    print("Start testing using the best validatino model")
     # save the prediction and attention scores for patches
     model.load_state_dict(torch.load(best_model_filename)['state_dict'])
-    test_results = []  # Store AUCs for all domains
     for test_list_path in args.test_list_paths:
         # creating the test data loader
         domain_name = test_list_path.stem.split('_')[-1]  # Extracting the domain name from the filename
@@ -192,11 +189,16 @@ def main(args):
         probs = test(epoch, test_loader, model, device, args)
         inference_end_time = time.time()
         inference_runtime = inference_end_time - inference_start_time
-        auc = roc_auc_score(test_loader.dataset.df.target, probs)
+        # evaluate
+        test_metrics = evaluate(test_loader.dataset.df.target, probs, best_thresh)
+        test_metrics_prefixed = {f"{domain_name}_{key}": value for key, value in test_metrics.items()}
         # Log each domain's test result
         wandb.log({
-            f"{domain_name}_test_auc": auc,
+            "run_id": domain_name,
+            **test_metrics_prefixed
         })
+        print(domain_name, test_metrics)
+        log_results(best_val_metrics,  f"{args.wandb_group}_{domain_name}", os.path.join(args.output_root, args.wandb_project, f"test_results_run{run_num}.csv"))
 
     # Create a wandb Artifact for the best model and add the file to it
     model_artifact = wandb.Artifact('best_model_checkpoint', type='model')

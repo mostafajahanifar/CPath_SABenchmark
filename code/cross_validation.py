@@ -8,7 +8,7 @@ from config import get_config
 configs = get_config()
 
 exp_name = (
-    f"PanMSI__{configs.design}__{configs.encoder}__{configs.method}"
+    f"PanMSI-Aggregation__{configs.method}__{configs.design}__{configs.encoder}"
 )
 if isinstance(configs.additional_desc, str):
     add_desc = configs.additional_desc
@@ -57,6 +57,6 @@ for ex in configs.folds:
         configs.random_seed = run+1
         configs.wandb_project = exp_name
         configs.wandb_group = f"experiment_{ex}"
-        configs.wandb_note = f"run_{run+1}"
+        configs.wandb_note = f"run_{run}"
 
         main(configs)
